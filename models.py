@@ -1,22 +1,18 @@
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any
 
-from config import SearchConfig, normalize_portal_address, galaxy_to_generator_index
-
-
-def _stringify(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text.lower() if text else None
+from config import SearchConfig, normalize_portal_address
 
 
-def _coerce_int(value: Any) -> int | None:
-    if value is None:
+def _text(value: Any) -> str | None:
+    return str(value).strip().lower() if value is not None and str(value).strip() else None
+
+
+def _number(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
         return None
     try:
         return int(value)
@@ -24,411 +20,160 @@ def _coerce_int(value: Any) -> int | None:
         return None
 
 
-def _coerce_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _coerce_bool(value: Any) -> bool | None:
+def _flag(value: Any) -> bool | None:
     if value is None:
         return None
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"true", "yes", "1"}:
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
             return True
-        if lowered in {"false", "no", "0"}:
+        if normalized in {"false", "0", "no"}:
             return False
-    return bool(value)
+        return None
+    return None
 
 
-@dataclass
+@dataclass(frozen=True)
 class SearchResult:
+    """Normalized system record; payload preserves all upstream fields."""
+
     address: str
     galaxy: int
     payload: dict[str, Any]
 
+    @classmethod
+    def from_upstream(cls, payload: dict[str, Any], address: str, galaxy: int) -> "SearchResult":
+        if not isinstance(payload, dict):
+            raise TypeError("Upstream system must be a JSON object.")
+        upstream_address = payload.get("address", address)
+        upstream_galaxy = payload.get("galaxy", galaxy)
+        normalized = normalize_portal_address(str(upstream_address))
+        if normalized != normalize_portal_address(address):
+            raise ValueError(f"Bridge address mismatch: requested {address}, received {normalized}.")
+        if int(upstream_galaxy) != galaxy - 1:
+            raise ValueError(
+                f"Bridge galaxy mismatch: expected generator index {galaxy - 1}, got {upstream_galaxy}."
+            )
+        return cls(normalized, galaxy, payload)
+
     @property
     def star_type(self) -> str | None:
-        return _stringify(self.payload.get("starType") or self.payload.get("star_type"))
+        return _text(self.payload.get("starType"))
 
     @property
     def race(self) -> str | None:
-        return _stringify(self.payload.get("race"))
+        return _text(self.payload.get("race"))
 
     @property
     def economy(self) -> str | None:
-        return _stringify(self.payload.get("economy"))
+        return _text(self.payload.get("economy"))
 
     @property
     def conflict(self) -> str | None:
-        return _stringify(self.payload.get("conflict"))
-
-    @property
-    def pirate(self) -> bool | None:
-        return _coerce_bool(self.payload.get("pirate", self.payload.get("outlaw")))
-
-    @property
-    def abandoned(self) -> bool | None:
-        return _coerce_bool(self.payload.get("abandoned"))
-
-    @property
-    def uncharted(self) -> bool | None:
-        return _coerce_bool(self.payload.get("uncharted"))
-
-    @property
-    def black_hole(self) -> bool | None:
-        return _coerce_bool(self.payload.get("isBlackHole", self.payload.get("black_hole")))
-
-    @property
-    def atlas_system(self) -> bool | None:
-        return _coerce_bool(self.payload.get("isAtlas", self.payload.get("atlas_system")))
+        return _text(self.payload.get("conflict"))
 
     @property
     def suns(self) -> int | None:
-        return _coerce_int(self.payload.get("suns", self.payload.get("sunCount", self.payload.get("sun_count"))))
+        # nms-lookup.js does not currently return a sun count.
+        return _number(self.payload.get("suns"))
 
     @property
     def planets(self) -> int | None:
-        return _coerce_int(self.payload.get("planets", self.payload.get("planetCount", self.payload.get("planet_count"))))
+        return _number(self.payload.get("planets"))
 
     @property
     def moons(self) -> int | None:
-        return _coerce_int(self.payload.get("moons"))
+        return _number(self.payload.get("moons"))
 
     @property
     def lush_planets(self) -> int | None:
-        return _coerce_int(self.payload.get("lushPlanets", self.payload.get("lush_planets")))
+        # Biomes are not part of nms-lookup.js's response, so this is
+        # intentionally unknown unless a future/upstream payload supplies it.
+        return _number(self.payload.get("lushPlanets"))
 
     @property
     def economy_tier(self) -> int | None:
-        value = self.payload.get("economyTier")
-        if value is None:
-            value = self.payload.get("economy_tier")
-        if value is None:
-            value = self.payload.get("econTier")
-        if value is None:
-            return None
-        tier = _coerce_int(value)
-        return tier if tier is not None else None
+        # Upstream econTier is 0=low, 1=medium, 2=high. Config uses 1..3.
+        value = _number(self.payload.get("econTier"))
+        return value + 1 if value is not None and 0 <= value <= 2 else None
 
     @property
     def conflict_tier(self) -> int | None:
-        value = self.payload.get("conflictTier")
-        if value is None:
-            value = self.payload.get("conflict_tier")
-        if value is None:
-            value = self.payload.get("conTier")
-        if value is None:
-            return None
-        tier = _coerce_int(value)
-        return tier if tier is not None else None
+        value = _number(self.payload.get("conTier"))
+        return value + 1 if value is not None and 0 <= value <= 2 else None
+
+    @property
+    def pirate(self) -> bool | None:
+        return _flag(self.payload.get("outlaw"))
+
+    @property
+    def abandoned(self) -> bool | None:
+        return _flag(self.payload.get("abandoned"))
+
+    @property
+    def uncharted(self) -> bool | None:
+        return _flag(self.payload.get("uncharted"))
+
+    @property
+    def black_hole(self) -> bool | None:
+        return _flag(self.payload.get("isBlackHole"))
+
+    @property
+    def atlas_system(self) -> bool | None:
+        return _flag(self.payload.get("isAtlas"))
 
     @property
     def core_distance(self) -> float | None:
         coords = self.payload.get("coords")
         if not isinstance(coords, dict):
             return None
-
-        x = _coerce_float(coords.get("x"))
-        y = _coerce_float(coords.get("y"))
-        z = _coerce_float(coords.get("z"))
-
-        if x is None or y is None or z is None:
+        try:
+            x, y, z = (float(coords[axis]) for axis in ("x", "y", "z"))
+        except (KeyError, TypeError, ValueError):
             return None
-
-        return math.sqrt((x * x) + (y * y) + (z * z))
+        return math.sqrt(x * x + y * y + z * z)
 
     def matches(self, config: SearchConfig) -> bool:
-        if config.star_color is not None and self.star_type != config.star_color:
-            return False
-
-        if config.min_suns is not None:
-            if self.suns is None or self.suns < config.min_suns:
+        checks = (
+            (config.star_color, self.star_type, "eq"),
+            (config.economy, self.economy, "eq"),
+            (config.conflict, self.conflict, "eq"),
+            (config.race, self.race, "eq"),
+            (config.exact_suns, self.suns, "eq"),
+            (config.exact_planets, self.planets, "eq"),
+            (config.exact_lush_planets, self.lush_planets, "eq"),
+            (config.economy_tier, self.economy_tier, "eq"),
+            (config.conflict_tier, self.conflict_tier, "eq"),
+            (config.pirate, self.pirate, "eq"),
+            (config.abandoned, self.abandoned, "eq"),
+            (config.uncharted, self.uncharted, "eq"),
+            (config.black_hole, self.black_hole, "eq"),
+            (config.atlas_system, self.atlas_system, "eq"),
+            (config.min_suns, self.suns, "min"),
+            (config.min_planets, self.planets, "min"),
+            (config.min_moons, self.moons, "min"),
+            (config.min_lush_planets, self.lush_planets, "min"),
+            (config.max_moons, self.moons, "max"),
+            (config.min_core_distance, self.core_distance, "min"),
+            (config.max_core_distance, self.core_distance, "max"),
+        )
+        for expected, actual, operation in checks:
+            if expected is None:
+                continue
+            if actual is None:
                 return False
-        if config.exact_suns is not None:
-            if self.suns is None or self.suns != config.exact_suns:
+            if operation == "eq" and isinstance(expected, str):
+                if actual != expected.lower():
+                    return False
+            elif operation == "eq" and actual != expected:
                 return False
-
-        if config.min_planets is not None:
-            if self.planets is None or self.planets < config.min_planets:
+            elif operation == "min" and actual < expected:
                 return False
-        if config.exact_planets is not None:
-            if self.planets is None or self.planets != config.exact_planets:
+            elif operation == "max" and actual > expected:
                 return False
-
-        if config.min_moons is not None:
-            if self.moons is None or self.moons < config.min_moons:
-                return False
-        if config.max_moons is not None:
-            if self.moons is not None and self.moons > config.max_moons:
-                return False
-
-        if config.min_lush_planets is not None:
-            if self.lush_planets is None or self.lush_planets < config.min_lush_planets:
-                return False
-        if config.exact_lush_planets is not None:
-            if self.lush_planets is None or self.lush_planets != config.exact_lush_planets:
-                return False
-
-        if config.economy is not None:
-            if self.economy is None or self.economy != config.economy:
-                return False
-        if config.economy_tier is not None:
-            if self.economy_tier is None or self.economy_tier != config.economy_tier:
-                return False
-
-        if config.conflict is not None:
-            if self.conflict is None or self.conflict != config.conflict:
-                return False
-        if config.conflict_tier is not None:
-            if self.conflict_tier is None or self.conflict_tier != config.conflict_tier:
-                return False
-
-        if config.race is not None:
-            if self.race is None or self.race != config.race:
-                return False
-
-        if config.pirate is not None:
-            if self.pirate is None or self.pirate != config.pirate:
-                return False
-
-        if config.abandoned is not None:
-            if self.abandoned is None or self.abandoned != config.abandoned:
-                return False
-
-        if config.uncharted is not None:
-            if self.uncharted is None or self.uncharted != config.uncharted:
-                return False
-
-        if config.black_hole is not None:
-            if self.black_hole is None or self.black_hole != config.black_hole:
-                return False
-
-        if config.atlas_system is not None:
-            if self.atlas_system is None or self.atlas_system != config.atlas_system:
-                return False
-
-        if config.min_core_distance is not None:
-            dist = self.core_distance
-            if dist is None or dist < config.min_core_distance:
-                return False
-        if config.max_core_distance is not None:
-            dist = self.core_distance
-            if dist is not None and dist > config.max_core_distance:
-                return False
-
         return True
 
 
-class JSBridge:
-    """Thin wrapper around the Node bridge used by the submodule."""
-
-    def __init__(
-        self,
-        bridge_path: str = "js/bridge.mjs",
-        node_bin: str = "node",
-    ) -> None:
-        self.bridge_path = bridge_path
-        self.node_bin = node_bin
-
-        self.process = __import__("subprocess").Popen(
-            [self.node_bin, self.bridge_path],
-            stdin=__import__("subprocess").PIPE,
-            stdout=__import__("subprocess").PIPE,
-            stderr=__import__("subprocess").PIPE,
-            text=True,
-            bufsize=1,
-        )
-
-    def _send(self, payload: dict[str, Any]) -> Any:
-        if self.process.stdin is None or self.process.stdout is None:
-            raise RuntimeError("Bridge process I/O is not available.")
-
-        self.process.stdin.write(json.dumps(payload) + "\n")
-        self.process.stdin.flush()
-
-        raw = self.process.stdout.readline()
-        if not raw:
-            error_text = self.process.stderr.read() if self.process.stderr else ""
-            raise RuntimeError(f"Bridge closed unexpectedly: {error_text}")
-
-        response = json.loads(raw)
-        if not response.get("success"):
-            raise RuntimeError(response.get("error", "Bridge call failed"))
-
-        return response.get("data")
-
-    def lookup(self, portal_address: str, galaxy: int = 0) -> dict[str, Any]:
-        address = normalize_portal_address(portal_address)
-        result = self._send({"action": "lookup", "portal_code": address, "galaxy": galaxy})
-        if isinstance(result, dict):
-            return result
-        raise TypeError("Bridge lookup returned a non-object result.")
-
-    def batch(self, portal_addresses: Sequence[str], galaxy: int = 0) -> list[dict[str, Any]]:
-        if not portal_addresses:
-            return []
-
-        normalized = [normalize_portal_address(address) for address in portal_addresses]
-        result = self._send(
-            {
-                "action": "batch",
-                "systems": [{"portal_code": address, "galaxy": galaxy} for address in normalized],
-            }
-        )
-
-        if result is None:
-            return []
-        if isinstance(result, list):
-            return [item for item in result if isinstance(item, dict)]
-        if isinstance(result, dict):
-            return [result]
-        raise TypeError("Bridge batch returned an unexpected payload type.")
-
-    def close(self) -> None:
-        try:
-            if self.process.stdin is not None:
-                self.process.stdin.close()
-        except Exception:
-            pass
-
-        try:
-            if self.process.stdout is not None:
-                self.process.stdout.close()
-        except Exception:
-            pass
-
-        try:
-            if self.process.stderr is not None:
-                self.process.stderr.close()
-        except Exception:
-            pass
-
-        try:
-            self.process.wait(timeout=2)
-        except Exception:
-            pass
-
-
-def _batched(items: Sequence[str], batch_size: int) -> Iterator[list[str]]:
-    for index in range(0, len(items), batch_size):
-        yield list(items[index : index + batch_size])
-
-
-def _iter_random_addresses(config: SearchConfig, limit: int | None = None) -> Iterator[str]:
-    rng = __import__("random").Random(config.random_seed)
-    produced = 0
-
-    while True:
-        if limit is not None and produced >= limit:
-            break
-
-        yield format(rng.getrandbits(48), "012X")
-        produced += 1
-
-
-def _iter_sequential_addresses(start_address: str, limit: int | None = None) -> Iterator[str]:
-    start = int(normalize_portal_address(start_address), 16)
-    produced = 0
-
-    while True:
-        if limit is not None and produced >= limit:
-            break
-
-        yield format(start, "012X")
-        start += 1
-        produced += 1
-
-
-def _iter_addresses(config: SearchConfig, limit: int | None = None) -> Iterator[str]:
-    if config.search_mode == "random":
-        yield from _iter_random_addresses(config, limit=limit)
-        return
-
-    if config.search_mode == "sequential":
-        if config.start_address is None:
-            raise ValueError("Sequential search requires a starting portal address.")
-        yield from _iter_sequential_addresses(config.start_address, limit=limit)
-        return
-
-    raise ValueError(f"Unsupported search mode: {config.search_mode}")
-
-
-def search_systems(config: SearchConfig, bridge: JSBridge | None = None) -> list[SearchResult]:
-    config.validate()
-
-    if bridge is None:
-        bridge = JSBridge()
-
-    addresses: list[str]
-    if config.search_mode == "random":
-        limit = config.max_systems
-        addresses = list(_iter_addresses(config, limit=limit))
-    else:
-        limit = config.max_systems
-        addresses = list(_iter_addresses(config, limit=limit))
-
-    galaxy_index = galaxy_to_generator_index(config.galaxy)
-    checked = 0
-    matches: list[SearchResult] = []
-
-    for batch in _batched(addresses, config.batch_size):
-        batch_data = bridge.batch(batch, galaxy=galaxy_index)
-        if not isinstance(batch_data, list):
-            batch_data = [batch_data]
-
-        for payload in batch_data:
-            checked += 1
-
-            if not isinstance(payload, dict):
-                continue
-
-            result = SearchResult(
-                address=str(payload.get("address") or payload.get("portal_code") or ""),
-                galaxy=config.galaxy,
-                payload=payload,
-            )
-
-            if result.matches(config):
-                matches.append(result)
-
-            if config.max_matches is not None and len(matches) >= config.max_matches:
-                return matches
-
-            if config.max_systems is not None and checked >= config.max_systems:
-                return matches
-
-    return matches
-
-
-__all__ = [
-    "SearchResult",
-    "JSBridge",
-    "search_systems",
-    "_iter_random_addresses",
-    "_iter_sequential_addresses",
-]
-
-
-if __name__ == "__main__":
-    cfg = SearchConfig(
-        galaxy=1,
-        star_color="yellow",
-        min_planets=3,
-        max_moons=2,
-        search_mode="random",
-        random_seed=42,
-        batch_size=10,
-        max_systems=20,
-        max_matches=5,
-    )
-    results = search_systems(cfg)
-    for result in results:
-        print(result.address, result.race, result.economy, result.conflict)
-"path":"models.py
+__all__ = ["SearchResult"]

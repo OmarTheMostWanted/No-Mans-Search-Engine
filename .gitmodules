@@ -1,0 +1,3 @@
+[submodule "nms-galactic-map"]
+	path = nms-galactic-map
+	url = https://github.com/elegra1965-source/nms-galactic-map.git

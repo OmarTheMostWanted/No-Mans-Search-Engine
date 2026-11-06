@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+# Contains the personal NMS Almanac API key; never commit this file.
+config.local.json
+
+# Generated lookup databases
+/data/

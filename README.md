@@ -30,21 +30,19 @@ No Python packages need to be installed. Verify the real generator integration w
 python -m unittest -v
 ```
 
-## Community lookup key
+## Configure a community API key locally
 
-The optional client uses the NMS Almanac API (`https://nmsalmanac.com/api/`) with an HTTP Bearer key, matching the integration in the dependency. Keep the key out of source control. Set it in the shell environment:
+The optional client calls the NMS Almanac API (`https://nmsalmanac.com/api/`) with an HTTP Bearer key. Enter it using the interactive prompt (input is hidden):
 
 ```bash
-# macOS / Linux
-export NMS_ALMANAC_API_KEY='your-issued-key'
-
-# PowerShell
-$env:NMS_ALMANAC_API_KEY = 'your-issued-key'
+python cli.py --configure-community-key
 ```
 
-When this variable is present, community enrichment runs automatically after generated matches have been printed. Use `--no-community-lookup` to skip it, or `--community-lookup` to require it (the latter reports a configuration error if no key is set). The API key is never printed or written to the cache.
+This writes `community_api_key` into the local `config.local.json` file. `.gitignore` excludes that file, and the program attempts to restrict its file permissions to the current user. The example template `config.local.example.json` contains no real key. Alternatively, set `NMS_ALMANAC_API_KEY` in the environment; the environment value takes precedence over the local file. Do not commit or share the local config file.
 
-The dependency documents a 500-request/hour Almanac key quota and applies a 40 uncached system lookups/hour visitor cap in its own hosted proxy. This local client accesses the Almanac directly, so it conservatively caps all direct API calls at 450 per rolling hour (configurable downward, never above 450), paces calls at least one second apart, stores responses in `data/community.sqlite3`, and stops on HTTP 429. A full record can cost one system request plus one request per planet (up to eight). Cached responses do not consume the local API budget. The direct API key's use is not shared with the dependency's hosted proxy; the 450-call guard only tracks this installation.
+When a key is configured, community enrichment runs automatically after generated matches have been printed. Use `--no-community-lookup` to skip it, or `--community-lookup` to require it (the latter reports a configuration error if no key is set).
+
+The dependency documents a 500-request/hour Almanac key quota and applies a 40 uncached system lookups/hour visitor cap in its hosted proxy. This local client accesses the Almanac directly, so it conservatively caps direct API calls at 450 per rolling hour (configurable downward, never above 450), paces calls at least one second apart, stores responses in `data/community.sqlite3`, and stops on HTTP 429. A full record can cost one system request plus one request per planet (up to eight). Cached responses do not consume the local API budget. The direct API key's use is not shared with the dependency's hosted proxy; the 450-call guard only tracks this installation.
 
 ## Run a search
 
@@ -72,7 +70,7 @@ For the previously discussed system-level criteria, community lookups and their 
 python cli.py --galaxy 19 --economy-tier 3 --conflict-tier 1 --race korvax --max-matches 20 --duration 300
 ```
 
-The community lookup reports Almanac-recorded sun count, planet biomes, and weather when a matching community record exists. It does not infer a Paradise-world count or require complete community coverage: planet biome/weather labels are displayed as recorded, and database coverage can be sparse. Those results are separate from the procedural address-generated fields.
+The community lookup reports Almanac-recorded sun count, planet biomes, and weather when a matching community record exists. It does not infer a Paradise-world count or require complete community coverage: planet biome/weather labels are displayed as recorded, and database coverage can be sparse.
 
 Use `python cli.py --help` for all options. Filters are case-insensitive where they accept text. Tier values are 1 (low), 2 (medium), 3 (high); the included generator's 0-based tiers are converted to these values. Galaxy numbering in this CLI is human-friendly (Euclid is 1), converted to the submodule's index (Euclid is 0).
 

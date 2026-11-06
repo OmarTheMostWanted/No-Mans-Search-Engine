@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 
 from cache import SQLiteSystemCache
 from community import CommunityClient, CommunityLookupError, CommunityRateLimit
-from config import SearchConfig
+from config import SearchConfig, save_community_api_key
 from generator import search_systems
 from js_bridge import JSBridge
 
@@ -22,6 +23,8 @@ def _bool_arg(value: str) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Search real No Man's Sky systems with nms-galactic-map.")
+    parser.add_argument("--configure-community-key", action="store_true",
+                        help="Prompt privately for an Almanac key and save it to the Git-ignored config.local.json, then exit.")
     parser.add_argument("--galaxy", type=int, default=1, help="Galaxy number (1-255; Euclid is 1).")
     parser.add_argument("--star-color", choices=("yellow", "red", "green", "blue", "purple"))
     parser.add_argument("--min-planets", type=int)
@@ -50,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--node", default="node")
     parser.add_argument("--json", action="store_true", help="Output matching systems as JSON Lines.")
     parser.add_argument("--community-lookup", action=argparse.BooleanOptionalAction, default=None,
-                        help="After printing generated matches, enrich them from NMS Almanac (auto-enabled when API key is set).")
+                        help="After printing generated matches, enrich them from NMS Almanac (auto-enabled when API key is configured).")
     parser.add_argument("--community-cache-path", default="data/community.sqlite3")
     parser.add_argument("--community-hourly-limit", type=int, default=450,
                         help="Conservative local rolling-hour API-call cap (maximum 450; upstream documents a 500/hour key quota).")
@@ -61,8 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def config_from_args(args: argparse.Namespace) -> SearchConfig:
     values = vars(args).copy()
-    for key in ("bridge", "node", "json", "community_lookup"):
-        values.pop(key)
+    for key in ("bridge", "node", "json", "community_lookup", "configure_community_key"):
+        values.pop(key, None)
     values["black_hole"] = values.pop("black_hole", None)
     values["atlas_system"] = values.pop("atlas_system", None)
     values["community_cache_path"] = values.pop("community_cache_path")
@@ -71,6 +74,18 @@ def config_from_args(args: argparse.Namespace) -> SearchConfig:
     config = SearchConfig(**values)
     config.validate()
     return config
+
+
+def _configure_key() -> int:
+    try:
+        key = getpass.getpass("NMS Almanac API key (input hidden): ").strip()
+        path = save_community_api_key(key)
+    except (EOFError, OSError, ValueError) as exc:
+        print(f"Could not save API key: {exc}", file=sys.stderr)
+        return 2
+    print(f"API key saved to Git-ignored local config: {path}")
+    print("The key is excluded from git by .gitignore. Do not remove that ignore rule or share this file.")
+    return 0
 
 
 def _print_generated(results, as_json: bool) -> None:
@@ -107,11 +122,13 @@ def _print_community(record: dict, as_json: bool) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.configure_community_key:
+        return _configure_key()
     try:
         config = config_from_args(args)
         do_community = bool(config.community_api_key) if args.community_lookup is None else args.community_lookup
         if do_community and not config.community_api_key:
-            parser.error("Community lookup requires NMS_ALMANAC_API_KEY; set it in your environment (do not put it in source control).")
+            parser.error("Community lookup requires an API key. Run `python cli.py --configure-community-key` or set NMS_ALMANAC_API_KEY.")
         cache = SQLiteSystemCache(config.cache_path) if config.cache_enabled else None
         try:
             with JSBridge(args.bridge, args.node) as bridge:

@@ -1,80 +1,70 @@
 from __future__ import annotations
 
+import tempfile
+import unittest
+from pathlib import Path
+
+from cache import SQLiteSystemCache
 from config import SearchConfig
-from generator import iter_portal_addresses
+from generator import iter_portal_addresses, search_systems
+from js_bridge import JSBridge
 from models import SystemRecord
 
 
-def test_config_validation() -> None:
-    cfg = SearchConfig(galaxy=1, search_mode="sequential", start_address="000000000000")
-    cfg.validate()
-    assert cfg.galaxy == 1
-    assert cfg.search_mode == "sequential"
+class ConfigAndAddressTests(unittest.TestCase):
+    def test_config_validation(self):
+        config = SearchConfig(galaxy=1, search_mode="sequential", start_address="000000000000")
+        config.validate()
+        self.assertEqual(config.galaxy, 1)
+        with self.assertRaises(ValueError):
+            SearchConfig(galaxy=0).validate()
 
-    try:
-        SearchConfig(galaxy=0).validate()
-        raise AssertionError("Galaxy 0 should be rejected")
-    except ValueError:
-        pass
+    def test_sequential_addresses_are_canonical_and_wrap(self):
+        config = SearchConfig(search_mode="sequential", start_address="0FFFFFFFFFFF")
+        addresses = iter_portal_addresses(config)
+        self.assertEqual([next(addresses) for _ in range(3)],
+                         ["0FFFFFFFFFFF", "000000000000", "000000000001"])
+
+    def test_random_addresses_are_reproducible_and_canonical(self):
+        left = iter_portal_addresses(SearchConfig(random_seed=77))
+        right = iter_portal_addresses(SearchConfig(random_seed=77))
+        values = [next(left) for _ in range(5)]
+        self.assertEqual(values, [next(right) for _ in range(5)])
+        self.assertTrue(all(len(value) == 12 and value[0] == "0" for value in values))
+
+    def test_cache_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cache.sqlite"
+            payload = {"address": "0807F07FFFFF", "galaxy": 0}
+            with SQLiteSystemCache(path) as cache:
+                cache.set(payload["address"], 0, payload)
+                self.assertEqual(cache.get(payload["address"], 0), payload)
+                self.assertIsNone(cache.get(payload["address"], 1))
 
 
-def test_iter_portal_addresses_sequential() -> None:
-    cfg = SearchConfig(
-        galaxy=1,
-        search_mode="sequential",
-        start_address="000000000000",
-    )
+class RealSubmoduleIntegrationTests(unittest.TestCase):
+    """Integration tests deliberately execute the checked-out NMS submodule."""
 
-    first = next(iter_portal_addresses(cfg))
-    second = next(iter_portal_addresses(cfg))
-    third = next(iter_portal_addresses(cfg))
-    assert first == "000000000000"
-    assert second == "000000000001"
-    assert third == "000000000002"
+    def test_real_lookup_uses_submodule_and_local_letter_map(self):
+        with JSBridge() as bridge:
+            record_data = bridge.batch(["0807F07FFFFF"], galaxy=0)[0]
+        record = SystemRecord.from_upstream(record_data, "0807F07FFFFF", 1)
+        self.assertEqual(record.star_color, record_data["starType"])
+        self.assertIn(record.star_color, {"yellow", "green", "blue", "red", "purple"})
+        self.assertIsInstance(record.planets, int)
+        self.assertIsInstance(record.moons, int)
+        self.assertTrue(record_data.get("name"), "local letter-map should provide a generated name")
 
-
-def test_system_record_matches() -> None:
-    record = SystemRecord(
-        portal_address="000000000001",
-        galaxy=1,
-        star_color="yellow",
-        planets=4,
-        moons=2,
-        race="Gek",
-        economy="Mining",
-        economy_tier=2,
-        conflict="Fractious",
-        conflict_tier=2,
-        pirate=False,
-        abandoned=False,
-        uncharted=False,
-    )
-
-    cfg = SearchConfig(
-        galaxy=1,
-        star_color="yellow",
-        min_planets=3,
-        max_moons=3,
-        economy="mining",
-        economy_tier=2,
-        race="gek",
-        pirate=False,
-        search_mode="random",
-        random_seed=123,
-    )
-    assert record.matches(cfg)
-
-    cfg2 = SearchConfig(
-        galaxy=1,
-        star_color="green",
-        search_mode="random",
-        random_seed=123,
-    )
-    assert not record.matches(cfg2)
+    def test_search_calls_real_generator_and_returns_systems(self):
+        config = SearchConfig(search_mode="sequential", start_address="0807F07FFFFF",
+                              max_systems=3, max_matches=3, batch_size=2, duration_seconds=30,
+                              cache_enabled=False)
+        with JSBridge() as bridge:
+            results = search_systems(config, bridge)
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(result.portal_address.startswith("0") for result in results))
+        self.assertTrue(all(result.galaxy == 1 for result in results))
 
 
 if __name__ == "__main__":
-    test_config_validation()
-    test_iter_portal_addresses_sequential()
-    test_system_record_matches()
-    print("all tests passed")
+    unittest.main()

@@ -1,68 +1,62 @@
-
-import { getSystem } from
-    "../nms-galactic-map/nms-tools/nms-lookup.js";
-
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import readline from "node:readline";
 
-const rl = readline.createInterface({
-    input: process.stdin,
-    terminal: false
-});
+import { init, getSystem } from "../nms-galactic-map/nms-tools/nms-lookup.js";
 
-async function handleRequest(request) {
-    switch (request.action) {
-        case "lookup": {
-            return await getSystem(
-                request.portal_code,
-                request.galaxy ?? 0
-            );
-        }
+const here = path.dirname(fileURLToPath(import.meta.url));
+const corePath = path.resolve(here, "../nms-galactic-map/nms-core");
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+let ready;
 
-        case "batch": {
-            if (!Array.isArray(request.systems)) {
-                throw new Error("'systems' must be an array.");
-            }
+async function ensureReady() {
+    ready ??= init(corePath);
+    await ready;
+}
 
-            const results = [];
-
-            for (const item of request.systems) {
-                const system = await getSystem(
-                    item.portal_code,
-                    item.galaxy ?? 0
-                );
-
-                results.push(system);
-            }
-
-            return results;
-        }
-
-        default:
-            throw new Error(
-                `Unknown action: ${request.action}`
-            );
+function validateAddress(address) {
+    if (typeof address !== "string" || !/^[0-9A-Fa-f]{12}$/.test(address)) {
+        throw new Error("portal_code must be exactly 12 hexadecimal characters");
     }
+}
+
+function validateGalaxy(galaxy) {
+    if (!Number.isInteger(galaxy) || galaxy < 0 || galaxy > 255) {
+        throw new Error("galaxy must be an integer from 0 to 255");
+    }
+}
+
+async function lookup(item) {
+    validateAddress(item.portal_code);
+    const galaxy = Number(item.galaxy ?? 0);
+    validateGalaxy(galaxy);
+    const address = item.portal_code.toUpperCase();
+    const system = await getSystem(address, galaxy);
+    // Strictly preserve the documented nms-lookup.js response contract.
+    const required = ["address", "galaxy", "starType", "planets", "moons", "race", "economy", "econTier", "conflict", "conTier", "abandoned", "uncharted", "outlaw", "isBlackHole", "isAtlas", "coords"];
+    for (const key of required) {
+        if (!(key in system)) throw new Error(`nms-lookup response missing required field: ${key}`);
+    }
+    return system;
+}
+
+async function handle(request) {
+    if (!request || typeof request !== "object") throw new Error("request must be an object");
+    await ensureReady();
+    if (request.action === "lookup") return lookup(request);
+    if (request.action === "batch") {
+        if (!Array.isArray(request.systems)) throw new Error("systems must be an array");
+        return Promise.all(request.systems.map(lookup));
+    }
+    throw new Error(`Unknown action: ${request.action}`);
 }
 
 for await (const line of rl) {
     if (!line.trim()) continue;
-
     try {
-        const request = JSON.parse(line);
-        const result = await handleRequest(request);
-
-        process.stdout.write(
-            JSON.stringify({
-                success: true,
-                data: result
-            }) + "\n"
-        );
+        const data = await handle(JSON.parse(line));
+        process.stdout.write(JSON.stringify({ success: true, data }) + "\n");
     } catch (error) {
-        process.stdout.write(
-            JSON.stringify({
-                success: false,
-                error: error.message
-            }) + "\n"
-        );
+        process.stdout.write(JSON.stringify({ success: false, error: error?.message ?? String(error) }) + "\n");
     }
 }

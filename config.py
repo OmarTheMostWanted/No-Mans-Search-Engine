@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+import os
 import re
 
 MAX_GALAXY_NUMBER = 255
@@ -58,6 +59,11 @@ class SearchConfig:
     max_matches: int | None = None
     cache_enabled: bool = True
     cache_path: Path = Path("data/systems.sqlite3")
+    # Secret is read from the environment, never committed or printed in repr.
+    community_api_key: str = field(default_factory=lambda: os.getenv("NMS_ALMANAC_API_KEY", "").strip(), repr=False, compare=False)
+    community_cache_path: Path = Path("data/community.sqlite3")
+    community_hourly_request_limit: int = 450
+    community_min_request_interval: float = 1.0
 
     def validate(self) -> None:
         if not 1 <= self.galaxy <= MAX_GALAXY_NUMBER:
@@ -102,4 +108,9 @@ class SearchConfig:
             value = getattr(self, name)
             if value is not None and value <= 0:
                 raise ValueError(f"{name.replace('_', ' ').capitalize()} must be greater than zero.")
+        if not 1 <= self.community_hourly_request_limit <= 450:
+            raise ValueError("Community API request limit must be between 1 and 450 per hour (below the documented 500/hour key quota).")
+        if self.community_min_request_interval < 0:
+            raise ValueError("Community API request interval cannot be negative.")
         self.cache_path = Path(self.cache_path)
+        self.community_cache_path = Path(self.community_cache_path)

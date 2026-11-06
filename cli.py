@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from cache import SQLiteSystemCache
+from community import CommunityClient, CommunityLookupError, CommunityRateLimit
 from config import SearchConfig
 from generator import search_systems
 from js_bridge import JSBridge
@@ -47,18 +49,59 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bridge", default="js/bridge.mjs")
     parser.add_argument("--node", default="node")
     parser.add_argument("--json", action="store_true", help="Output matching systems as JSON Lines.")
+    parser.add_argument("--community-lookup", action=argparse.BooleanOptionalAction, default=None,
+                        help="After printing generated matches, enrich them from NMS Almanac (auto-enabled when API key is set).")
+    parser.add_argument("--community-cache-path", default="data/community.sqlite3")
+    parser.add_argument("--community-hourly-limit", type=int, default=450,
+                        help="Conservative local rolling-hour API-call cap (maximum 450; upstream documents a 500/hour key quota).")
+    parser.add_argument("--community-request-interval", type=float, default=1.0,
+                        help="Minimum seconds between community API requests.")
     return parser
 
 
 def config_from_args(args: argparse.Namespace) -> SearchConfig:
     values = vars(args).copy()
-    for key in ("bridge", "node", "json"):
+    for key in ("bridge", "node", "json", "community_lookup"):
         values.pop(key)
     values["black_hole"] = values.pop("black_hole", None)
     values["atlas_system"] = values.pop("atlas_system", None)
+    values["community_cache_path"] = values.pop("community_cache_path")
+    values["community_hourly_request_limit"] = values.pop("community_hourly_limit")
+    values["community_min_request_interval"] = values.pop("community_request_interval")
     config = SearchConfig(**values)
     config.validate()
     return config
+
+
+def _print_generated(results, as_json: bool) -> None:
+    if as_json:
+        for result in results:
+            print(json.dumps({"type": "generated_system", "address": result.portal_address,
+                              "galaxy": result.galaxy, **result.data}, sort_keys=True), flush=True)
+    else:
+        print(f"Found {len(results)} matching generated system(s).", flush=True)
+        for result in results:
+            data = result.data
+            print(f"{result.portal_address}  {data.get('name') or '(unnamed)'}  {result.star_color or '?'}  "
+                  f"{result.planets} planets/{result.moons} moons  {result.race or '?'}  {result.economy or '?'}",
+                  flush=True)
+
+
+def _print_community(record: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"type": "community_lookup", **record}, sort_keys=True), flush=True)
+        return
+    if not record.get("found"):
+        print(f"  Community: no NMS Almanac record for {record['address']}.", flush=True)
+        return
+    system = record.get("system") or {}
+    print(f"  Community (NMS Almanac): {system.get('name') or '(unnamed)'}; "
+          f"suns={system.get('suns') if system.get('suns') is not None else 'unknown'}; "
+          f"{len(record.get('planets', []))} planet record(s).", flush=True)
+    for planet in record.get("planets", []):
+        print(f"    {planet.get('portal', '')}  {planet.get('name') or '(unnamed)'}  "
+              f"biome={planet.get('biome') or 'unknown'}  weather={planet.get('weather') or 'unknown'}",
+              flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -66,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = config_from_args(args)
+        do_community = bool(config.community_api_key) if args.community_lookup is None else args.community_lookup
+        if do_community and not config.community_api_key:
+            parser.error("Community lookup requires NMS_ALMANAC_API_KEY; set it in your environment (do not put it in source control).")
         cache = SQLiteSystemCache(config.cache_path) if config.cache_enabled else None
         try:
             with JSBridge(args.bridge, args.node) as bridge:
@@ -75,15 +121,35 @@ def main(argv: list[str] | None = None) -> int:
                 cache.close()
     except (ValueError, RuntimeError, OSError) as exc:
         parser.error(str(exc))
-    if args.json:
-        for result in results:
-            print(json.dumps({"address": result.portal_address, **result.data}, sort_keys=True))
-    else:
-        print(f"Found {len(results)} matching system(s).")
-        for result in results:
-            data = result.data
-            print(f"{result.portal_address}  {data.get('name') or '(unnamed)'}  {result.star_color or '?'}  "
-                  f"{result.planets} planets/{result.moons} moons  {result.race or '?'}  {result.economy or '?'}")
+
+    # Always print generated matches before making any optional community calls.
+    _print_generated(results, args.json)
+    if not do_community:
+        return 0
+    if not results:
+        print("No generated matches to look up in the community database.", file=sys.stderr, flush=True)
+        return 0
+
+    print("Looking up generated matches in NMS Almanac (cached records are free; uncached requests are paced and rate-limited)...",
+          file=sys.stderr, flush=True)
+    try:
+        with CommunityClient(config) as client:
+            for result in results:
+                try:
+                    record = client.lookup(result.portal_address, result.galaxy)
+                    _print_community(record, args.json)
+                except CommunityRateLimit as exc:
+                    message = str(exc)
+                    if exc.retry_after:
+                        message += f" Retry after approximately {exc.retry_after} seconds."
+                    print(f"Community lookups stopped: {message}", file=sys.stderr, flush=True)
+                    break
+                except CommunityLookupError as exc:
+                    print(f"Community lookup failed for {result.portal_address}: {exc}", file=sys.stderr, flush=True)
+                    if "API key" in str(exc):
+                        break
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(f"Community lookup unavailable: {exc}", file=sys.stderr, flush=True)
     return 0
 
 

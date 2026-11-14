@@ -1,81 +1,44 @@
 from __future__ import annotations
 
+import argparse
 import json
-import os
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
-APP_ROOT = Path(__file__).resolve().parent
-LOCAL_CONFIG_PATH = APP_ROOT / "config.local.json"
-DEFAULT_DB_PATH = APP_ROOT / "data" / "nms_search.sqlite3"
+from community import AlmanacClient
+from config import load_config
+from database import SQLiteStore
+from generator import SearchFilters, lookup_system, search_systems
 
 
-@dataclass
-class AppConfig:
-    """Runtime configuration for the local NMS toolchain."""
-
-    db_path: Path = DEFAULT_DB_PATH
-    local_config_path: Path = LOCAL_CONFIG_PATH
-    almanac_api_key: str = ""
-    almanac_requests_per_hour: int = 500
-    almanac_base_url: str = "https://nmsalmanac.com/api/"
-    map_bridge_path: str | Path = "nms-galactic-map/nms-tools/nms-lookup.js"
-    map_core_path: str | Path = "nms-galactic-map/nms-core"
-
-
-def _read_local_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Local config file is not valid JSON: {path}") from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"Local config file must contain a JSON object: {path}")
-    return data
+def parser() -> argparse.ArgumentParser:
+    """Build CLI parser. No key or API rate-limit flags are provided; use config.local.json."""
+    root=argparse.ArgumentParser(description="Look up and search NMS systems")
+    commands=root.add_subparsers(dest="command",required=True)
+    for name in ("lookup","almanac"):
+        p=commands.add_parser(name); p.add_argument("address"); p.add_argument("--galaxy",type=int,default=0); p.add_argument("--json",action="store_true")
+    p=commands.add_parser("search"); p.add_argument("--galaxy",type=int,default=0); p.add_argument("--mode",choices=("random","sequential"),default="random")
+    p.add_argument("--seed",type=int); p.add_argument("--start-address"); p.add_argument("--max-results",type=int,default=20); p.add_argument("--max-checks",type=int,default=2000)
+    p.add_argument("--star-type"); p.add_argument("--race"); p.add_argument("--economy"); p.add_argument("--conflict")
+    p.add_argument("--min-planets",type=int); p.add_argument("--max-planets",type=int); p.add_argument("--min-moons",type=int); p.add_argument("--max-moons",type=int)
+    for flag in ("abandoned","uncharted","outlaw","is-black-hole","is-atlas"): p.add_argument("--"+flag,action="store_true",default=None)
+    p.add_argument("--json",action="store_true")
+    return root
 
 
-def load_config() -> AppConfig:
-    """Load configuration from JSON and environment.
-
-    Supported keys:
-    - almanac_api_key
-    - almanac_requests_per_hour
-
-    Supported env vars:
-    - NMS_ALMANAC_API_KEY
-    - NMS_ALMANAC_REQUESTS_PER_HOUR
-    """
-
-    local_data = _read_local_json(LOCAL_CONFIG_PATH)
-
-    key = os.environ.get("NMS_ALMANAC_API_KEY", "").strip()
-    if not key:
-        key = str(local_data.get("almanac_api_key", "")).strip()
-
-    requests_raw = os.environ.get("NMS_ALMANAC_REQUESTS_PER_HOUR", "").strip()
-    if requests_raw:
-        try:
-            requests_amount = int(requests_raw)
-        except ValueError as exc:
-            raise ValueError("NMS_ALMANAC_REQUESTS_PER_HOUR must be an integer") from exc
+def main(argv: list[str]|None=None) -> int:
+    args=parser().parse_args(argv); config=load_config()
+    if args.command=="lookup":
+        with SQLiteStore(config.db_path) as store: result=lookup_system(args.address,args.galaxy,config=config,store=store)
+    elif args.command=="almanac":
+        with SQLiteStore(config.db_path) as store, AlmanacClient(config,store) as client: result=client.lookup_system(args.address,args.galaxy)
     else:
-        raw_value = local_data.get("almanac_requests_per_hour", 500)
-        try:
-            requests_amount = int(raw_value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("almanac_requests_per_hour must be an integer") from exc
+        values={k:getattr(args,k.replace("-","_"),None) for k in ()}
+        filters=SearchFilters(star_type=args.star_type,race=args.race,economy=args.economy,conflict=args.conflict,
+            min_planets=args.min_planets,max_planets=args.max_planets,min_moons=args.min_moons,max_moons=args.max_moons,
+            abandoned=args.abandoned,uncharted=args.uncharted,outlaw=args.outlaw,is_black_hole=args.is_black_hole,is_atlas=args.is_atlas)
+        with SQLiteStore(config.db_path) as store: result=search_systems(args.galaxy,filters=filters,mode=args.mode,seed=args.seed,start_address=args.start_address,max_results=args.max_results,max_checks=args.max_checks,config=config,store=store)
+    if args.json: print(json.dumps(result,ensure_ascii=False,indent=2,sort_keys=True))
+    else: print(json.dumps(result,ensure_ascii=False,indent=2))
+    return 0
 
-    if requests_amount <= 0:
-        raise ValueError("almanac_requests_per_hour must be greater than zero")
-
-    return AppConfig(
-        db_path=APP_ROOT / "data" / "nms_search.sqlite3",
-        local_config_path=LOCAL_CONFIG_PATH,
-        almanac_api_key=key,
-        almanac_requests_per_hour=requests_amount,
-    )
-
-
-__all__ = ["AppConfig", "load_config"]
+if __name__=="__main__":
+    raise SystemExit(main())

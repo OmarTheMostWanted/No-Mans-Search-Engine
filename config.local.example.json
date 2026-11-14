@@ -1,3 +1,4 @@
 {
-  "community_api_key": "paste-your-NMS-Almanac-key-here"
+  "almanac_api_key": "paste-your-key-here",
+  "almanac_requests_per_hour": 500
 }

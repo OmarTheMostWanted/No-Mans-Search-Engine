@@ -1,81 +1,81 @@
-# No Man's Sky System Search
+from __future__ import annotations
 
-A command-line search tool that enumerates portal codes and generates system data with the included [`nms-galactic-map`](https://github.com/elegra1965-source/nms-galactic-map) Git submodule. It does not use a remote service or fake generator data. After printing all generated matches, it can enrich each match with community-recorded NMS Almanac system and planet data.
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-## Requirements
+APP_ROOT = Path(__file__).resolve().parent
+LOCAL_CONFIG_PATH = APP_ROOT / "config.local.json"
+DEFAULT_DB_PATH = APP_ROOT / "data" / "nms_search.sqlite3"
 
-- Python 3.10+
-- Node.js 18+ (ES modules and BigInt support)
-- Git with submodule support
-- Optional NMS Almanac API key for community lookups
 
-## Setup
+@dataclass
+class AppConfig:
+    """Runtime configuration for the local NMS search project.
 
-Clone this branch and initialize the included generator:
+    This project intentionally keeps secrets in a local json file instead of a
+    CLI flag. The idea is simple: the user places a key in a file on disk and
+    the program reads it. No prompts, no hidden interactive credential flow.
+    """
 
-```bash
-git clone --branch copilot/implement-nms-system-search --recurse-submodules https://github.com/OmarTheMostWanted/No-Mans-Search-Engine.git
-cd No-Mans-Search-Engine
-```
+    db_path: Path = DEFAULT_DB_PATH
+    local_config_path: Path = LOCAL_CONFIG_PATH
+    almanac_api_key: str = ""
+    almanac_requests_per_hour: int = 500
+    almanac_base_url: str = "https://nmsalmanac.com/api/"
+    map_bridge_path: str | Path = "nms-galactic-map/nms-tools/nms-lookup.js"
+    map_core_path: str | Path = "nms-galactic-map/nms-core"
 
-If you already cloned without submodules:
 
-```bash
-git submodule update --init --recursive
-```
+def _read_local_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise ValueError(f"Local config file is not valid JSON: {path}") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Local config file must contain a JSON object: {path}")
+    return loaded
 
-No Python packages need to be installed. Verify the real generator integration with:
 
-```bash
-python -m unittest -v
-```
+def load_config() -> AppConfig:
+    """Load config from environment and a local config file.
 
-## Configure a community API key locally
+    Supported file keys:
+    - almanac_api_key
+    - almanac_requests_per_hour
 
-The optional client calls the NMS Almanac API (`https://nmsalmanac.com/api/`) with an HTTP Bearer key. Enter it using the interactive prompt (input is hidden):
+    Supported environment variables:
+    - NMS_ALMANAC_API_KEY
+    - NMS_ALMANAC_REQUESTS_PER_HOUR
+    """
 
-```bash
-python cli.py --configure-community-key
-```
+    local_data = _read_local_json(LOCAL_CONFIG_PATH)
+    key = os.environ.get("NMS_ALMANAC_API_KEY", "").strip()
+    if not key:
+        key = str(local_data.get("almanac_api_key", "")).strip()
 
-This writes `community_api_key` into the local `config.local.json` file. `.gitignore` excludes that file, and the program attempts to restrict its file permissions to the current user. The example template `config.local.example.json` contains no real key. Alternatively, set `NMS_ALMANAC_API_KEY` in the environment; the environment value takes precedence over the local file. Do not commit or share the local config file.
+    requests_per_hour = os.environ.get("NMS_ALMANAC_REQUESTS_PER_HOUR", "")
+    if requests_per_hour:
+        try:
+            requests_per_hour_value = int(requests_per_hour)
+        except ValueError as exc:  # pragma: no cover - defensive
+            raise ValueError("NMS_ALMANAC_REQUESTS_PER_HOUR must be an integer") from exc
+    else:
+        requests_per_hour_value = int(local_data.get("almanac_requests_per_hour", 500))
 
-When a key is configured, community enrichment runs automatically after generated matches have been printed. Use `--no-community-lookup` to skip it, or `--community-lookup` to require it (the latter reports a configuration error if no key is set).
+    if requests_per_hour_value <= 0:
+        raise ValueError("almanac_requests_per_hour must be greater than zero")
 
-The dependency documents a 500-request/hour Almanac key quota and applies a 40 uncached system lookups/hour visitor cap in its hosted proxy. This local client accesses the Almanac directly, so it conservatively caps direct API calls at 450 per rolling hour (configurable downward, never above 450), paces calls at least one second apart, stores responses in `data/community.sqlite3`, and stops on HTTP 429. A full record can cost one system request plus one request per planet (up to eight). Cached responses do not consume the local API budget. The direct API key's use is not shared with the dependency's hosted proxy; the 450-call guard only tracks this installation.
+    return AppConfig(
+        db_path=APP_ROOT / "data" / "nms_search.sqlite3",
+        local_config_path=LOCAL_CONFIG_PATH,
+        almanac_api_key=key,
+        almanac_requests_per_hour=requests_per_hour_value,
+    )
 
-## Run a search
 
-Try a bounded search first (search duration otherwise defaults to one hour):
-
-```bash
-python cli.py --star-color blue --min-planets 5 --max-systems 500 --duration 60
-```
-
-Search sequentially from a portal code:
-
-```bash
-python cli.py --mode sequential --start-address 0807F07FFFFF --max-systems 1000 --duration 120
-```
-
-Get JSON Lines output (generated matches are emitted first, followed by community lookup records):
-
-```bash
-python cli.py --race korvax --economy-tier 3 --max-matches 20 --duration 300 --json
-```
-
-For the previously discussed system-level criteria, community lookups and their body data can be viewed with:
-
-```bash
-python cli.py --galaxy 19 --economy-tier 3 --conflict-tier 1 --race korvax --max-matches 20 --duration 300
-```
-
-The community lookup reports Almanac-recorded sun count, planet biomes, and weather when a matching community record exists. It does not infer a Paradise-world count or require complete community coverage: planet biome/weather labels are displayed as recorded, and database coverage can be sparse.
-
-Use `python cli.py --help` for all options. Filters are case-insensitive where they accept text. Tier values are 1 (low), 2 (medium), 3 (high); the included generator's 0-based tiers are converted to these values. Galaxy numbering in this CLI is human-friendly (Euclid is 1), converted to the submodule's index (Euclid is 0).
-
-Searches cover canonical system addresses, with the planet glyph held at zero so one system is not searched repeatedly through its 16 planet-address variants. Random search is reproducible with `--seed`. `--max-systems` and `--max-matches` bound a run; results are printed before community enrichment begins. Generated systems are cached in `data/systems.sqlite3`; community responses and their request-budget ledger are cached in `data/community.sqlite3`. Disable generated cache with `--no-cache`; disable community lookup with `--no-community-lookup`.
-
-## Data scope
-
-The included upstream API derives star type, planet/moon counts, economy, conflict, race, special-system flags, coordinates, and generated names from portal code and galaxy. Its system and planet-level biome/environment fields are not an address-derived authoritative result. NMS Almanac values are community records and can be missing or incomplete. The upstream API does not provide a generated sun-count field; Almanac may provide a recorded `suns` value.
+__all__ = ["AppConfig", "load_config"]

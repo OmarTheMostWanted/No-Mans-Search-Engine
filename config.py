@@ -49,14 +49,13 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     db_path = Path(data.get("database", "data/nms_search.sqlite3"))
     if not db_path.is_absolute():
         db_path = ROOT / db_path
-    bridge = ROOT / "js" / "bridge.mjs"
     return AppConfig(
         db_path=db_path,
         almanac_api_key=os.getenv("NMS_ALMANAC_API_KEY", str(data.get("almanac_api_key", ""))).strip(),
         almanac_requests_per_hour=limit,
         almanac_base_url=str(data.get("almanac_base_url", "https://nmsalmanac.com/api/")).rstrip("/") + "/",
         node_command=str(data.get("node", "node")),
-        bridge_path=bridge,
+        bridge_path=ROOT / "js" / "bridge.mjs",
     )
 
 
@@ -66,6 +65,15 @@ def normalize_address(address: str) -> str:
     if len(value) != 12 or any(char not in "0123456789ABCDEF" for char in value):
         raise ValueError("Portal address must be exactly 12 hexadecimal characters")
     return value
+
+
+def canonical_system_address(address: str) -> str:
+    """Return a system-level address with planet glyph zero.
+
+    The first portal glyph identifies a body within the system. The other eleven
+    glyphs identify the system, so body variants share one system cache/API lookup.
+    """
+    return "0" + normalize_address(address)[1:]
 
 
 def validate_galaxy(galaxy: int) -> int:
